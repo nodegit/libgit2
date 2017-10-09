@@ -1,4 +1,12 @@
-#include "common.h"
+/*
+ * Copyright (C) the libgit2 contributors. All rights reserved.
+ *
+ * This file is part of libgit2, distributed under the GNU GPL v2 with
+ * a Linking Exception. For full terms see the included COPYING file.
+ */
+
+#include "attrcache.h"
+
 #include "repository.h"
 #include "attr_file.h"
 #include "config.h"
@@ -290,14 +298,16 @@ static int attr_cache__lookup_path(
 		const char *cfgval = entry->value;
 
 		/* expand leading ~/ as needed */
-		if (cfgval && cfgval[0] == '~' && cfgval[1] == '/' &&
-			!git_sysdir_find_global_file(&buf, &cfgval[2]))
-			*out = git_buf_detach(&buf);
-		else if (cfgval)
+		if (cfgval && cfgval[0] == '~' && cfgval[1] == '/') {
+			if (! (error = git_sysdir_expand_global_file(&buf, &cfgval[2])))
+				*out = git_buf_detach(&buf);
+		} else if (cfgval) {
 			*out = git__strdup(cfgval);
+		}
 	}
-	else if (!git_sysdir_find_xdg_file(&buf, fallback))
+	else if (!git_sysdir_find_xdg_file(&buf, fallback)) {
 		*out = git_buf_detach(&buf);
+	}
 
 	git_config_entry_free(entry);
 	git_buf_free(&buf);

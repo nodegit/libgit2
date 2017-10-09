@@ -4,8 +4,10 @@
  * This file is part of libgit2, distributed under the GNU GPL v2 with
  * a Linking Exception. For full terms see the included COPYING file.
  */
-#include "git2.h"
+
 #include "smart.h"
+
+#include "git2.h"
 #include "refs.h"
 #include "refspec.h"
 #include "proxy.h"
@@ -470,6 +472,12 @@ int git_transport_smart_credentials(git_cred **out, git_transport *transport, co
 	transport_smart *t = (transport_smart *)transport;
 
 	return t->cred_acquire_cb(out, t->url, user, methods, t->cred_acquire_payload);
+}
+
+int git_transport_smart_proxy_options(git_proxy_options *out, git_transport *transport)
+{
+	transport_smart *t = (transport_smart *) transport;
+	return git_proxy_options_dup(out, &t->proxy);
 }
 
 int git_transport_smart(git_transport **out, git_remote *owner, void *param)

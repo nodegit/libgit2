@@ -5,6 +5,8 @@
  * a Linking Exception. For full terms see the included COPYING file.
  */
 
+#include "curl_stream.h"
+
 #ifdef GIT_CURL
 
 #include <curl/curl.h>
@@ -52,6 +54,7 @@ static int apply_proxy_creds(curl_stream *s)
 {
 	CURLcode res;
 	git_cred_userpass_plaintext *userpass;
+	long auth_types;
 
 	if (!s->proxy_cred)
 		return GIT_ENOTFOUND;
@@ -61,6 +64,19 @@ static int apply_proxy_creds(curl_stream *s)
 		return seterr_curl(s);
 	if ((res = curl_easy_setopt(s->handle, CURLOPT_PROXYPASSWORD, userpass->password)) != CURLE_OK)
 		return seterr_curl(s);
+
+	curl_easy_getinfo(s->handle, CURLINFO_PROXYAUTH_AVAIL, &auth_types);
+
+	if (auth_types & CURLAUTH_NTLM) {
+		if ((res = curl_easy_setopt(s->handle, CURLOPT_PROXYAUTH, CURLAUTH_NTLM)) != CURLE_OK)
+			return seterr_curl(s);
+	} else if (auth_types & CURLAUTH_DIGEST) {
+		if ((res = curl_easy_setopt(s->handle, CURLOPT_PROXYAUTH, CURLAUTH_DIGEST)) != CURLE_OK)
+			return seterr_curl(s);
+	} else if (auth_types & CURLAUTH_BASIC) {
+		if ((res = curl_easy_setopt(s->handle, CURLOPT_PROXYAUTH, CURLAUTH_BASIC)) != CURLE_OK)
+			return seterr_curl(s);
+	}
 
 	return 0;
 }
@@ -193,6 +209,7 @@ static int curls_set_proxy(git_stream *stream, const git_proxy_options *proxy_op
 	CURLcode res;
 	curl_stream *s = (curl_stream *) stream;
 
+	git_proxy_options_clear(&s->proxy);
 	if ((error = git_proxy_options_dup(&s->proxy, proxy_opts)) < 0)
 		return error;
 
@@ -293,6 +310,8 @@ static void curls_free(git_stream *stream)
 
 	curls_close(stream);
 	git_strarray_free(&s->cert_info_strings);
+	git_proxy_options_clear(&s->proxy);
+	git_cred_free(s->proxy_cred);
 	git__free(s);
 }
 

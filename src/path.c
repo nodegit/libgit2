@@ -4,8 +4,9 @@
  * This file is part of libgit2, distributed under the GNU GPL v2 with
  * a Linking Exception. For full terms see the included COPYING file.
  */
-#include "common.h"
+
 #include "path.h"
+
 #include "posix.h"
 #include "repository.h"
 #ifdef GIT_WIN32
@@ -1708,6 +1709,7 @@ GIT_INLINE(unsigned int) dotgit_flags(
 	unsigned int flags)
 {
 	int protectHFS = 0, protectNTFS = 0;
+	int error = 0;
 
 	flags |= GIT_PATH_REJECT_DOT_GIT_LITERAL;
 
@@ -1720,13 +1722,13 @@ GIT_INLINE(unsigned int) dotgit_flags(
 #endif
 
 	if (repo && !protectHFS)
-		git_repository__cvar(&protectHFS, repo, GIT_CVAR_PROTECTHFS);
-	if (protectHFS)
+		error = git_repository__cvar(&protectHFS, repo, GIT_CVAR_PROTECTHFS);
+	if (!error && protectHFS)
 		flags |= GIT_PATH_REJECT_DOT_GIT_HFS;
 
 	if (repo && !protectNTFS)
-		git_repository__cvar(&protectNTFS, repo, GIT_CVAR_PROTECTNTFS);
-	if (protectNTFS)
+		error = git_repository__cvar(&protectNTFS, repo, GIT_CVAR_PROTECTNTFS);
+	if (!error && protectNTFS)
 		flags |= GIT_PATH_REJECT_DOT_GIT_NTFS;
 
 	return flags;

@@ -4,9 +4,11 @@
  * This file is part of libgit2, distributed under the GNU GPL v2 with
  * a Linking Exception. For full terms see the included COPYING file.
  */
+
+#include "object.h"
+
 #include "git2/object.h"
 
-#include "common.h"
 #include "repository.h"
 
 #include "commit.h"
@@ -16,7 +18,6 @@
 #include "tag.h"
 
 bool git_object__strict_input_validation = true;
-bool git_object__synchronous_writing = false;
 
 typedef struct {
 	const char	*str;	/* type name string */

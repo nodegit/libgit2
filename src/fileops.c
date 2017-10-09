@@ -4,8 +4,9 @@
  * This file is part of libgit2, distributed under the GNU GPL v2 with
  * a Linking Exception. For full terms see the included COPYING file.
  */
-#include "common.h"
+
 #include "fileops.h"
+
 #include "global.h"
 #include "strmap.h"
 #include <ctype.h>
@@ -770,6 +771,9 @@ static int futils__rmdir_empty_parent(void *opaque, const char *path)
 
 		if (en == ENOENT || en == ENOTDIR) {
 			/* do nothing */
+		} else if ((data->flags & GIT_RMDIR_SKIP_NONEMPTY) == 0 &&
+			en == EBUSY) {
+			error = git_path_set_error(errno, path, "rmdir");
 		} else if (en == ENOTEMPTY || en == EEXIST || en == EBUSY) {
 			error = GIT_ITEROVER;
 		} else {
@@ -1155,9 +1159,13 @@ int git_futils_fsync_dir(const char *path)
 
 int git_futils_fsync_parent(const char *path)
 {
-	char *parent = git_path_dirname(path);
-	int error = git_futils_fsync_dir(parent);
+	char *parent;
+	int error;
 
+	if ((parent = git_path_dirname(path)) == NULL)
+		return -1;
+
+	error = git_futils_fsync_dir(parent);
 	git__free(parent);
 	return error;
 }

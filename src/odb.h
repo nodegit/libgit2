@@ -7,6 +7,8 @@
 #ifndef INCLUDE_odb_h__
 #define INCLUDE_odb_h__
 
+#include "common.h"
+
 #include "git2/odb.h"
 #include "git2/oid.h"
 #include "git2/types.h"
@@ -19,6 +21,8 @@
 #define GIT_OBJECTS_DIR "objects/"
 #define GIT_OBJECT_DIR_MODE 0777
 #define GIT_OBJECT_FILE_MODE 0444
+
+extern bool git_odb__strict_hash_verification;
 
 /* DO NOT EXPORT */
 typedef struct {
@@ -95,6 +99,12 @@ int git_odb__hashfd_filtered(
  * only point to blobs.
  */
 int git_odb__hashlink(git_oid *out, const char *path);
+
+/**
+ * Generate a GIT_EMISMATCH error for the ODB.
+ */
+int git_odb__error_mismatch(
+	const git_oid *expected, const git_oid *actual);
 
 /*
  * Generate a GIT_ENOTFOUND error for the ODB.

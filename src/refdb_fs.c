@@ -5,6 +5,8 @@
  * a Linking Exception. For full terms see the included COPYING file.
  */
 
+#include "refdb_fs.h"
+
 #include "refs.h"
 #include "hash.h"
 #include "repository.h"
@@ -13,7 +15,6 @@
 #include "pack.h"
 #include "reflog.h"
 #include "refdb.h"
-#include "refdb_fs.h"
 #include "iterator.h"
 #include "sortedcache.h"
 #include "signature.h"
@@ -1140,7 +1141,7 @@ out:
 static int maybe_append_head(refdb_fs_backend *backend, const git_reference *ref, const git_signature *who, const char *message)
 {
 	int error;
-	git_oid old_id = {{0}};
+	git_oid old_id;
 	git_reference *tmp = NULL, *head = NULL, *peeled = NULL;
 	const char *name;
 
@@ -1148,7 +1149,8 @@ static int maybe_append_head(refdb_fs_backend *backend, const git_reference *ref
 		return 0;
 
 	/* if we can't resolve, we use {0}*40 as old id */
-	git_reference_name_to_id(&old_id, backend->repo, ref->name);
+	if (git_reference_name_to_id(&old_id, backend->repo, ref->name) < 0)
+		memset(&old_id, 0, sizeof(old_id));
 
 	if ((error = git_reference_lookup(&head, backend->repo, GIT_HEAD_FILE)) < 0)
 		return error;
@@ -2031,7 +2033,7 @@ int git_refdb_backend_fs(
 		backend->direach_flags  |= GIT_PATH_DIR_PRECOMPOSE_UNICODE;
 	}
 	if ((!git_repository__cvar(&t, backend->repo, GIT_CVAR_FSYNCOBJECTFILES) && t) ||
-		git_object__synchronous_writing)
+		git_repository__fsync_gitdir)
 		backend->fsync = 1;
 
 	backend->parent.exists = &refdb_fs_backend__exists;

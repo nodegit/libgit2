@@ -5,6 +5,8 @@
  * a Linking Exception. For full terms see the included COPYING file.
  */
 
+#include "openssl_stream.h"
+
 #ifdef GIT_OPENSSL
 
 #include <ctype.h>
@@ -13,7 +15,6 @@
 #include "posix.h"
 #include "stream.h"
 #include "socket_stream.h"
-#include "openssl_stream.h"
 #include "netops.h"
 #include "git2/transport.h"
 #include "git2/sys/openssl.h"
@@ -103,7 +104,7 @@ int git_openssl_stream_global_init(void)
 	ssl_opts |= SSL_OP_NO_COMPRESSION;
 #endif
 
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
+#if OPENSSL_VERSION_NUMBER < 0x10100000L || defined(LIBRESSL_VERSION_NUMBER)
 	SSL_load_error_strings();
 	OpenSSL_add_ssl_algorithms();
 #else

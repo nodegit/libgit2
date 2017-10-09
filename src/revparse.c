@@ -5,9 +5,10 @@
  * a Linking Exception. For full terms see the included COPYING file.
  */
 
+#include "common.h"
+
 #include <assert.h>
 
-#include "common.h"
 #include "buffer.h"
 #include "tree.h"
 #include "refdb.h"
@@ -892,6 +893,17 @@ int git_revparse(
 		const char *rstr;
 		revspec->flags = GIT_REVPARSE_RANGE;
 
+		/*
+		 * Following git.git, don't allow '..' because it makes command line
+		 * arguments which can be either paths or revisions ambiguous when the
+		 * path is almost certainly intended. The empty range '...' is still
+		 * allowed.
+		 */
+		if (!git__strcmp(spec, "..")) {
+			giterr_set(GITERR_INVALID, "Invalid pattern '..'");
+			return GIT_EINVALIDSPEC;
+		}
+
 		lstr = git__substrdup(spec, dotdot - spec);
 		rstr = dotdot + 2;
 		if (dotdot[2] == '.') {
@@ -899,9 +911,17 @@ int git_revparse(
 			rstr++;
 		}
 
-		error = git_revparse_single(&revspec->from, repo, lstr);
-		if (!error)
-			error = git_revparse_single(&revspec->to, repo, rstr);
+		error = git_revparse_single(
+			&revspec->from,
+			repo,
+			*lstr == '\0' ? "HEAD" : lstr);
+
+		if (!error) {
+			error = git_revparse_single(
+				&revspec->to,
+				repo,
+				*rstr == '\0' ? "HEAD" : rstr);
+		}
 
 		git__free((void*)lstr);
 	} else {

@@ -4,8 +4,9 @@
  * This file is part of libgit2, distributed under the GNU GPL v2 with
  * a Linking Exception. For full terms see the included COPYING file.
  */
-#include "common.h"
+
 #include "global.h"
+
 #include "hash.h"
 #include "sysdir.h"
 #include "filter.h"
@@ -22,7 +23,7 @@
 
 git_mutex git__mwindow_mutex;
 
-#define MAX_SHUTDOWN_CB 8
+#define MAX_SHUTDOWN_CB 9
 
 static git_global_shutdown_fn git__shutdown_callbacks[MAX_SHUTDOWN_CB];
 static git_atomic git__n_shutdown_callbacks;

@@ -5,8 +5,8 @@
  * a Linking Exception. For full terms see the included COPYING file.
  */
 
-#include "common.h"
 #include "signature.h"
+
 #include "repository.h"
 #include "git2/common.h"
 #include "posix.h"
@@ -228,8 +228,12 @@ int git_signature__parse(git_signature *sig, const char **buffer_out,
 		const char *time_start = email_end + 2;
 		const char *time_end;
 
-		if (git__strtol64(&sig->when.time, time_start, &time_end, 10) < 0)
+		if (git__strtol64(&sig->when.time, time_start, &time_end, 10) < 0) {
+			git__free(sig->name);
+			git__free(sig->email);
+			sig->name = sig->email = NULL;
 			return signature_error("invalid Unix timestamp");
+		}
 
 		/* do we have a timezone? */
 		if (time_end + 1 < buffer_end) {

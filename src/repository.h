@@ -7,6 +7,8 @@
 #ifndef INCLUDE_repository_h__
 #define INCLUDE_repository_h__
 
+#include "common.h"
+
 #include "git2/common.h"
 #include "git2/oid.h"
 #include "git2/odb.h"
@@ -30,6 +32,8 @@
 
 /* Default DOS-compatible 8.3 "short name" for a git repository, "GIT~1" */
 #define GIT_DIR_SHORTNAME "GIT~1"
+
+extern bool git_repository__fsync_gitdir;
 
 /** Cvar cache identifiers */
 typedef enum {
@@ -158,6 +162,26 @@ GIT_INLINE(git_attr_cache *) git_repository_attr_cache(git_repository *repo)
 
 int git_repository_head_tree(git_tree **tree, git_repository *repo);
 int git_repository_create_head(const char *git_dir, const char *ref_name);
+
+/*
+ * Called for each HEAD.
+ *
+ * Can return either 0, causing the iteration over HEADs to
+ * continue, or a non-0 value causing the iteration to abort. The
+ * return value is passed back to the caller of
+ * `git_repository_foreach_head`
+ */
+typedef int (*git_repository_foreach_head_cb)(git_repository *repo, const char *path, void *payload);
+
+/*
+ * Iterate over repository and all worktree HEADs.
+ *
+ * This function will be called for the repository HEAD and for
+ * all HEADS of linked worktrees. For each HEAD, the callback is
+ * executed with the given payload. The return value equals the
+ * return value of the last executed callback function.
+ */
+int git_repository_foreach_head(git_repository *repo, git_repository_foreach_head_cb cb, void *payload);
 
 /*
  * Weak pointers to repository internals.

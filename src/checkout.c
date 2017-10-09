@@ -5,9 +5,9 @@
  * a Linking Exception. For full terms see the included COPYING file.
  */
 
-#include <assert.h>
-
 #include "checkout.h"
+
+#include <assert.h>
 
 #include "git2/repository.h"
 #include "git2/refs.h"
@@ -52,6 +52,12 @@ enum {
 };
 
 typedef struct {
+	git_atomic mkdir_calls;
+	git_atomic stat_calls;
+	git_atomic chmod_calls;
+} atomic_checkout_perfdata;
+
+typedef struct {
 	git_repository *repo;
 	git_iterator *target;
 	git_diff *diff;
@@ -60,20 +66,20 @@ typedef struct {
 	char *pfx;
 	git_index *index;
 	git_pool pool;
+	git_mutex index_mutex;
+	git_mutex mkpath_mutex;
 	git_vector removes;
 	git_vector remove_conflicts;
 	git_vector update_conflicts;
 	git_vector *update_reuc;
 	git_vector *update_names;
-	git_buf target_path;
-	size_t target_len;
+	git_buf repo_path;
 	git_buf tmp;
 	unsigned int strategy;
 	int can_symlink;
-	bool reload_submodules;
 	size_t total_steps;
 	size_t completed_steps;
-	git_checkout_perfdata perfdata;
+	atomic_checkout_perfdata perfdata;
 	git_strmap *mkdir_map;
 	git_attr_session attr_session;
 } checkout_data;
@@ -159,6 +165,19 @@ GIT_INLINE(bool) is_workdir_base_or_new(
 		git_oid__cmp(&newitem->id, workdir_id) == 0);
 }
 
+GIT_INLINE(bool) is_file_mode_changed(git_filemode_t a, git_filemode_t b)
+{
+#ifdef GIT_WIN32
+	/*
+	 * On Win32 we do not support the executable bit; the file will
+	 * always be 0100644 on disk, don't bother doing a test.
+	 */
+	return false;
+#else
+	return (S_ISREG(a) && S_ISREG(b) && a != b);
+#endif
+}
+
 static bool checkout_is_workdir_modified(
 	checkout_data *data,
 	const git_diff_file *baseitem,
@@ -200,7 +219,8 @@ static bool checkout_is_workdir_modified(
 	 */
 	if ((ie = git_index_get_bypath(data->index, wditem->path, 0)) != NULL) {
 		if (git_index_time_eq(&wditem->mtime, &ie->mtime) &&
-			wditem->file_size == ie->file_size)
+			wditem->file_size == ie->file_size &&
+			!is_file_mode_changed(wditem->mode, ie->mode))
 			return !is_workdir_base_or_new(&ie->id, baseitem, newitem);
 	}
 
@@ -213,6 +233,9 @@ static bool checkout_is_workdir_modified(
 	/* if the workdir item is a directory, it cannot be a modified file */
 	if (S_ISDIR(wditem->mode))
 		return false;
+
+	if (is_file_mode_changed(baseitem->mode, wditem->mode))
+		return true;
 
 	if (git_diff__oid_for_entry(&oid, data->diff, wditem, wditem->mode, NULL) < 0)
 		return false;
@@ -298,14 +321,12 @@ static int checkout_action_no_wd(
 }
 
 static int checkout_target_fullpath(
-	git_buf **out, checkout_data *data, const char *path)
+	git_buf *out, checkout_data *data, const char *path)
 {
-	git_buf_truncate(&data->target_path, data->target_len);
+	git_buf_cpy(out, &data->repo_path);
 
-	if (path && git_buf_puts(&data->target_path, path) < 0)
+	if (path && git_buf_puts(out, path) < 0)
 		return -1;
-
-	*out = &data->target_path;
 
 	return 0;
 }
@@ -313,15 +334,18 @@ static int checkout_target_fullpath(
 static bool wd_item_is_removable(
 	checkout_data *data, const git_index_entry *wd)
 {
-	git_buf *full;
+	git_buf fullpath;
+	bool removable = false;
 
 	if (wd->mode != GIT_FILEMODE_TREE)
 		return true;
 
-	if (checkout_target_fullpath(&full, data, wd->path) < 0)
-		return false;
+	if (checkout_target_fullpath(&fullpath, data, wd->path) >= 0) {
+		removable = !git_path_contains(&fullpath, DOT_GIT);
+	}
 
-	return !full || !git_path_contains(full, DOT_GIT);
+	git_buf_free(&fullpath);
+	return removable;
 }
 
 static int checkout_queue_remove(checkout_data *data, const char *path)
@@ -370,10 +394,8 @@ static int checkout_action_wd_only(
 			 */
 			const git_index_entry *e = git_index_get_byindex(data->index, pos);
 
-			if (e != NULL && data->diff->pfxcomp(e->path, wd->path) == 0) {
-				notify = GIT_CHECKOUT_NOTIFY_DIRTY;
-				remove = ((data->strategy & GIT_CHECKOUT_FORCE) != 0);
-			}
+			if (e != NULL && data->diff->pfxcomp(e->path, wd->path) == 0)
+				return git_iterator_advance_into(wditem, workdir);
 		}
 	}
 
@@ -447,12 +469,15 @@ static bool submodule_is_config_only(
 
 static bool checkout_is_empty_dir(checkout_data *data, const char *path)
 {
-	git_buf *fullpath;
+	git_buf fullpath;
+	bool is_empty = false;
 
-	if (checkout_target_fullpath(&fullpath, data, path) < 0)
-		return false;
+	if (checkout_target_fullpath(&fullpath, data, path) >= 0) {
+		is_empty = git_path_is_empty_dir(git_buf_cstr(&fullpath));
+	}
 
-	return git_path_is_empty_dir(fullpath->ptr);
+	git_buf_free(&fullpath);
+	return is_empty;
 }
 
 static int checkout_action_with_wd(
@@ -1379,6 +1404,7 @@ static bool should_remove_existing(checkout_data *data)
 #define MKDIR_REMOVE_EXISTING \
 	MKDIR_NORMAL | GIT_MKDIR_REMOVE_FILES | GIT_MKDIR_REMOVE_SYMLINKS
 
+/* not thread safe */
 static int checkout_mkdir(
 	checkout_data *data,
 	const char *path,
@@ -1395,9 +1421,9 @@ static int checkout_mkdir(
 	error = git_futils_mkdir_relative(
 		path, base, mode, flags, &mkdir_opts);
 
-	data->perfdata.mkdir_calls += mkdir_opts.perfdata.mkdir_calls;
-	data->perfdata.stat_calls += mkdir_opts.perfdata.stat_calls;
-	data->perfdata.chmod_calls += mkdir_opts.perfdata.chmod_calls;
+	git_atomic_add(&data->perfdata.mkdir_calls, mkdir_opts.perfdata.mkdir_calls);
+	git_atomic_add(&data->perfdata.stat_calls, mkdir_opts.perfdata.stat_calls);
+	git_atomic_add(&data->perfdata.chmod_calls, mkdir_opts.perfdata.chmod_calls);
 
 	return error;
 }
@@ -1406,18 +1432,22 @@ static int mkpath2file(
 	checkout_data *data, const char *path, unsigned int mode)
 {
 	struct stat st;
-	bool remove_existing = should_remove_existing(data);
-	unsigned int flags =
-		(remove_existing ? MKDIR_REMOVE_EXISTING : MKDIR_NORMAL) |
-		GIT_MKDIR_SKIP_LAST;
+	bool remove_existing;
+	unsigned int flags;
 	int error;
 
-	if ((error = checkout_mkdir(
-			data, path, data->opts.target_directory, mode, flags)) < 0)
-		return error;
+	git_mutex_lock(&data->mkpath_mutex);
+
+	remove_existing = should_remove_existing(data);
+	flags = (remove_existing ? MKDIR_REMOVE_EXISTING : MKDIR_NORMAL) |
+		GIT_MKDIR_SKIP_LAST;
+
+	if ((error = checkout_mkdir(data, path, data->opts.target_directory, mode,
+		flags)) < 0)
+		goto cleanup;
 
 	if (remove_existing) {
-		data->perfdata.stat_calls++;
+		git_atomic_inc(&data->perfdata.stat_calls);
 
 		if (p_lstat(path, &st) == 0) {
 
@@ -1429,12 +1459,14 @@ static int mkpath2file(
 			error = git_futils_rmdir_r(path, NULL, GIT_RMDIR_REMOVE_FILES);
 		} else if (errno != ENOENT) {
 			giterr_set(GITERR_OS, "failed to stat '%s'", path);
-			return GIT_EEXISTS;
+			error = GIT_EEXISTS;
 		} else {
 			giterr_clear();
 		}
 	}
 
+cleanup:
+	git_mutex_unlock(&data->mkpath_mutex);
 	return error;
 }
 
@@ -1488,12 +1520,14 @@ static int blob_content_to_file(
 	git_filter_list *fl = NULL;
 	int fd;
 	int error = 0;
+	git_buf temp_buf = GIT_BUF_INIT;
 
 	if (hint_path == NULL)
 		hint_path = path;
 
-	if ((error = mkpath2file(data, path, data->opts.dir_mode)) < 0)
-		return error;
+	error = mkpath2file(data, path, data->opts.dir_mode);
+	if (error < 0)
+		goto cleanup;
 
 	if (flags <= 0)
 		flags = O_CREAT | O_TRUNC | O_WRONLY;
@@ -1502,18 +1536,26 @@ static int blob_content_to_file(
 
 	if ((fd = p_open(path, flags, mode)) < 0) {
 		giterr_set(GITERR_OS, "could not open '%s' for writing", path);
-		return fd;
+		error = fd;
+		goto cleanup;
 	}
 
 	filter_opts.attr_session = &data->attr_session;
-	filter_opts.temp_buf = &data->tmp;
+	filter_opts.temp_buf = &temp_buf;
 
-	if (!data->opts.disable_filters &&
-		(error = git_filter_list__load_ext(
+	if (!data->opts.disable_filters) {
+		git_mutex_lock(&data->index_mutex);
+
+		error = git_filter_list__load_ext(
 			&fl, data->repo, blob, hint_path,
-			GIT_FILTER_TO_WORKTREE, &filter_opts))) {
-		p_close(fd);
-		return error;
+			GIT_FILTER_TO_WORKTREE, &filter_opts);
+
+		git_mutex_unlock(&data->index_mutex);
+
+		if(error) {
+			p_close(fd);
+			goto cleanup;
+		}
 	}
 
 	/* setup the writer */
@@ -1532,20 +1574,23 @@ static int blob_content_to_file(
 	git_filter_list_free(fl);
 
 	if (error < 0)
-		return error;
+		goto cleanup;
 
 	if (st) {
-		data->perfdata.stat_calls++;
+		git_atomic_inc(&data->perfdata.stat_calls);
 
 		if ((error = p_stat(path, st)) < 0) {
 			giterr_set(GITERR_OS, "failed to stat '%s'", path);
-			return error;
+			goto cleanup;
 		}
 
 		st->st_mode = entry_filemode;
 	}
 
-	return 0;
+	error = 0;
+cleanup:
+	git_buf_free(&temp_buf);
+	return error;
 }
 
 static int blob_content_to_link(
@@ -1571,7 +1616,7 @@ static int blob_content_to_link(
 	}
 
 	if (!error) {
-		data->perfdata.stat_calls++;
+		git_atomic_inc(&data->perfdata.stat_calls);
 
 		if ((error = p_lstat(path, st)) < 0)
 			giterr_set(GITERR_CHECKOUT, "could not stat symlink %s", path);
@@ -1606,26 +1651,31 @@ static int checkout_submodule_update_index(
 	checkout_data *data,
 	const git_diff_file *file)
 {
-	git_buf *fullpath;
+	git_buf fullpath;
 	struct stat st;
+	int error;
 
 	/* update the index unless prevented */
 	if ((data->strategy & GIT_CHECKOUT_DONT_UPDATE_INDEX) != 0)
 		return 0;
 
-	if (checkout_target_fullpath(&fullpath, data, file->path) < 0)
-		return -1;
+	if ((error = checkout_target_fullpath(&fullpath, data, file->path)) < 0)
+		goto cleanup;
 
-	data->perfdata.stat_calls++;
-	if (p_stat(fullpath->ptr, &st) < 0) {
+	git_atomic_inc(&data->perfdata.stat_calls);
+	if (p_stat(git_buf_cstr(&fullpath), &st) < 0) {
 		giterr_set(
 			GITERR_CHECKOUT, "could not stat submodule %s\n", file->path);
-		return GIT_ENOTFOUND;
+		error = GIT_ENOTFOUND;
+		goto cleanup;
 	}
 
 	st.st_mode = GIT_FILEMODE_COMMIT;
+	error = checkout_update_index(data, file, &st);
 
-	return checkout_update_index(data, file, &st);
+cleanup:
+	git_buf_free(&fullpath);
+	return error;
 }
 
 static int checkout_submodule(
@@ -1684,7 +1734,7 @@ static int checkout_safe_for_update_only(
 {
 	struct stat st;
 
-	data->perfdata.stat_calls++;
+	git_atomic_inc(&data->perfdata.stat_calls);
 
 	if (p_lstat(path, &st) < 0) {
 		/* if doesn't exist, then no error and no update */
@@ -1742,32 +1792,33 @@ static int checkout_blob(
 	checkout_data *data,
 	const git_diff_file *file)
 {
-	git_buf *fullpath;
+	git_buf fullpath;
 	struct stat st;
 	int error = 0;
 
-	if (checkout_target_fullpath(&fullpath, data, file->path) < 0)
-		return -1;
+	if ((error = checkout_target_fullpath(&fullpath, data, file->path)) < 0)
+		goto cleanup;
 
 	if ((data->strategy & GIT_CHECKOUT_UPDATE_ONLY) != 0) {
-		int rval = checkout_safe_for_update_only(
-			data, fullpath->ptr, file->mode);
+		error = checkout_safe_for_update_only(
+			data, git_buf_cstr(&fullpath), file->mode);
 
-		if (rval <= 0)
-			return rval;
+		if (error <= 0)
+			goto cleanup;
 	}
 
 	error = checkout_write_content(
-		data, &file->id, fullpath->ptr, NULL, file->mode, &st);
+		data, &file->id, git_buf_cstr(&fullpath), NULL, file->mode, &st);
 
 	/* update the index unless prevented */
-	if (!error && (data->strategy & GIT_CHECKOUT_DONT_UPDATE_INDEX) == 0)
+	if (!error && (data->strategy & GIT_CHECKOUT_DONT_UPDATE_INDEX) == 0) {
+		git_mutex_lock(&data->index_mutex);
 		error = checkout_update_index(data, file, &st);
+		git_mutex_unlock(&data->index_mutex);
+	}
 
-	/* update the submodule data if this was a new .gitmodules file */
-	if (!error && strcmp(file->path, ".gitmodules") == 0)
-		data->reload_submodules = true;
-
+cleanup:
+	git_buf_free(&fullpath);
 	return error;
 }
 
@@ -1779,23 +1830,23 @@ static int checkout_remove_the_old(
 	git_diff_delta *delta;
 	const char *str;
 	size_t i;
-	git_buf *fullpath;
+	git_buf fullpath;
 	uint32_t flg = GIT_RMDIR_EMPTY_PARENTS |
 		GIT_RMDIR_REMOVE_FILES | GIT_RMDIR_REMOVE_BLOCKERS;
 
 	if (data->opts.checkout_strategy & GIT_CHECKOUT_SKIP_LOCKED_DIRECTORIES)
 		flg |= GIT_RMDIR_SKIP_NONEMPTY;
 
-	if (checkout_target_fullpath(&fullpath, data, NULL) < 0)
-		return -1;
+	if ((error = checkout_target_fullpath(&fullpath, data, NULL)) < 0)
+		goto cleanup;
 
 	git_vector_foreach(&data->diff->deltas, i, delta) {
 		if (actions[i] & CHECKOUT_ACTION__REMOVE) {
 			error = git_futils_rmdir_r(
-				delta->old_file.path, fullpath->ptr, flg);
+				delta->old_file.path, git_buf_cstr(&fullpath), flg);
 
 			if (error < 0)
-				return error;
+				goto cleanup;
 
 			data->completed_steps++;
 			report_progress(data, delta->old_file.path);
@@ -1810,9 +1861,9 @@ static int checkout_remove_the_old(
 	}
 
 	git_vector_foreach(&data->removes, i, str) {
-		error = git_futils_rmdir_r(str, fullpath->ptr, flg);
+		error = git_futils_rmdir_r(str, git_buf_cstr(&fullpath), flg);
 		if (error < 0)
-			return error;
+			goto cleanup;
 
 		data->completed_steps++;
 		report_progress(data, str);
@@ -1827,7 +1878,11 @@ static int checkout_remove_the_old(
 		}
 	}
 
-	return 0;
+	error = 0;
+
+cleanup:
+	git_buf_free(&fullpath);
+	return error;
 }
 
 static int checkout_deferred_remove(git_repository *repo, const char *path)
@@ -1850,6 +1905,33 @@ static int checkout_deferred_remove(git_repository *repo, const char *path)
 #endif
 }
 
+static int checkout_create_the_new_blob(
+	checkout_data *data,
+	unsigned int action,
+	git_diff_delta *delta)
+{
+	int error = 0;
+
+	if (action & CHECKOUT_ACTION__DEFER_REMOVE) {
+		/* this had a blocker directory that should only be removed iff
+		 * all of the contents of the directory were safely removed
+		 */
+		if ((error = checkout_deferred_remove(data->repo, delta->old_file.path)) < 0)
+			return error;
+	}
+
+	if (action & CHECKOUT_ACTION__UPDATE_BLOB) {
+		error = checkout_blob(data, &delta->new_file);
+		if (error < 0)
+			return error;
+
+		data->completed_steps++;
+		report_progress(data, delta->new_file.path);
+	}
+
+	return 0;
+}
+
 static int checkout_create_the_new(
 	unsigned int *actions,
 	checkout_data *data)
@@ -1859,27 +1941,217 @@ static int checkout_create_the_new(
 	size_t i;
 
 	git_vector_foreach(&data->diff->deltas, i, delta) {
-		if (actions[i] & CHECKOUT_ACTION__DEFER_REMOVE) {
-			/* this had a blocker directory that should only be removed iff
-			 * all of the contents of the directory were safely removed
-			 */
-			if ((error = checkout_deferred_remove(
-					data->repo, delta->old_file.path)) < 0)
-				return error;
-		}
-
-		if (actions[i] & CHECKOUT_ACTION__UPDATE_BLOB) {
-			error = checkout_blob(data, &delta->new_file);
-			if (error < 0)
-				return error;
-
-			data->completed_steps++;
-			report_progress(data, delta->new_file.path);
-		}
+		if ((error = checkout_create_the_new_blob(data, actions[i], delta)) < 0)
+			return error;
 	}
 
 	return 0;
 }
+
+#if defined(GIT_THREADS)
+
+static int paths_cmp(const void *a, const void *b) { return git__strcmp((char*)a, (char*)b); }
+
+typedef struct {
+	int error;
+	int index;
+	bool skipped;
+} checkout_progress_pair;
+
+typedef struct {
+	git_thread thread;
+	const unsigned int *actions;
+	checkout_data *cd;
+
+	git_cond *cond;
+	git_mutex *mutex;
+
+	git_atomic *delta_index;
+	git_atomic *error;
+	git_vector *progress_pairs;
+} thread_params;
+
+static void *threaded_checkout_create_the_new(void *arg)
+{
+	thread_params *worker = arg;
+	int error;
+	size_t i;
+
+	while ((i = git_atomic_inc(worker->delta_index)) <
+			git_vector_length(&worker->cd->diff->deltas)) {
+		checkout_progress_pair *progress_pair;
+		git_diff_delta *delta = git_vector_get(&worker->cd->diff->deltas, i);
+
+		if (delta == NULL || git_atomic_get(worker->error) != 0)
+			return NULL;
+
+		if (worker->actions[i] & CHECKOUT_ACTION__DEFER_REMOVE) {
+			/* this had a blocker directory that should only be removed iff
+			 * all of the contents of the directory were safely removed
+			 */
+			if (
+				(error = checkout_deferred_remove(worker->cd->repo, delta->old_file.path)) < 0) {
+				git_atomic_set(worker->error, error);
+				git_cond_signal(worker->cond);
+				return NULL;
+			}
+		}
+
+		progress_pair = (checkout_progress_pair *)malloc(
+			sizeof(checkout_progress_pair));
+		if (progress_pair == NULL) {
+			git_atomic_set(worker->error, error);
+			git_cond_signal(worker->cond);
+			return NULL;
+		}
+
+		/* We will retry failed operations in the calling thread to handle
+		* the case where might encounter a file locking error due to
+		* multithreading and name collisions.
+		*/
+		if (worker->actions[i] & CHECKOUT_ACTION__UPDATE_BLOB) {
+			progress_pair->index = i;
+			progress_pair->error = checkout_blob(worker->cd, &delta->new_file);
+			progress_pair->skipped = false;
+		} else {
+			progress_pair->index = i;
+			progress_pair->error = 0;
+			progress_pair->skipped = true;
+		}
+
+		git_mutex_lock(worker->mutex);
+		git_vector_insert(worker->progress_pairs, progress_pair);
+		git_cond_signal(worker->cond);
+		git_mutex_unlock(worker->mutex);
+	}
+
+	return NULL;
+}
+
+static int ll_checkout_create_the_new(
+	unsigned int *actions,
+	checkout_data *data)
+{
+	thread_params *p;
+	size_t i, num_threads = git_online_cpus(), last_index = 0, current_index = 0,
+		num_deltas = git_vector_length(&data->diff->deltas);
+	int ret;
+	checkout_progress_pair *progress_pair;
+	git_atomic delta_index, error;
+	git_diff_delta *delta;
+	git_vector errored_pairs, progress_pairs;
+	git_cond cond;
+	git_mutex mutex;
+
+	if (num_threads <= 1) {
+		return checkout_create_the_new(actions, data);
+	}
+
+	if (
+		(ret = git_vector_init(&progress_pairs, num_deltas, paths_cmp)) < 0 ||
+		(ret = git_vector_init(&errored_pairs, num_deltas, paths_cmp)) < 0)
+		return ret;
+
+	p = git__mallocarray(num_threads, sizeof(*p));
+	GITERR_CHECK_ALLOC(p);
+
+	git_cond_init(&cond);
+	git_mutex_init(&mutex);
+	git_mutex_lock(&mutex);
+
+	git_atomic_set(&delta_index, -1);
+	git_atomic_set(&error, 0);
+
+	/* Initialize worker threads */
+	for (i = 0; i < num_threads; ++i) {
+		p[i].actions = actions;
+		p[i].cd = data;
+		p[i].cond = &cond;
+		p[i].mutex = &mutex;
+		p[i].error = &error;
+		p[i].delta_index = &delta_index;
+		p[i].progress_pairs = &progress_pairs;
+	}
+
+	/* Start worker threads */
+	for (i = 0; i < num_threads; ++i) {
+		ret = git_thread_create(&p[i].thread, threaded_checkout_create_the_new, &p[i]);
+
+		/* On error, we will cleanly exit any started worker threads,
+		 * and then return with our error code */
+		if (ret) {
+			git_atomic_set(&error, -1);
+			giterr_set(GITERR_THREAD, "unable to create thread");
+			git_mutex_unlock(&mutex);
+			/* Only clean up the number of threads we have started */
+			num_threads = i;
+			ret = -1;
+			goto cleanup;
+		}
+	}
+
+	while (last_index < num_deltas) {
+		if ((ret = git_atomic_get(&error)) != 0) {
+			git_mutex_unlock(&mutex);
+			goto cleanup;
+		}
+
+		current_index = git_vector_length(&progress_pairs);
+
+		if (last_index == current_index) {
+			git_cond_wait(&cond, &mutex);
+			current_index = git_vector_length(&progress_pairs);
+		}
+
+		git_mutex_unlock(&mutex);
+
+		for (; last_index < current_index; ++last_index) {
+			progress_pair = git_vector_get(&progress_pairs,
+				last_index);
+			delta = git_vector_get(&data->diff->deltas, last_index);
+
+			if (progress_pair->skipped)
+				continue;
+
+			/* We will retry errored checkouts synchronously after all the workers
+			 * complete
+			 */
+			if (progress_pair->error < 0) {
+				git_vector_insert(&errored_pairs, progress_pair);
+				continue;
+			}
+
+			data->completed_steps++;
+			report_progress(data, delta->new_file.path);
+		}
+		git_mutex_lock(&mutex);
+	}
+
+	git_vector_foreach(&errored_pairs, i, progress_pair) {
+		delta = git_vector_get(&data->diff->deltas, progress_pair->index);
+		if ((ret = checkout_create_the_new_blob(data, actions[progress_pair->index], delta)) < 0)
+			goto cleanup;
+	}
+
+cleanup:
+	for (i = 0; i < num_threads; ++i) {
+		git_thread_join(&p[i].thread, NULL);
+	}
+
+	git__free(p);
+	git_vector_free(&errored_pairs);
+	git_vector_free_deep(&progress_pairs);
+	git_cond_free(&cond);
+	git_mutex_free(&mutex);
+
+	return ret;
+}
+
+#else
+
+#define ll_checkout_create_the_new checkout_create_the_new
+
+#endif
 
 static int checkout_create_submodules(
 	unsigned int *actions,
@@ -1977,14 +2249,14 @@ static int checkout_write_entry(
 	const git_index_entry *side)
 {
 	const char *hint_path = NULL, *suffix;
-	git_buf *fullpath;
+	git_buf fullpath;
 	struct stat st;
 	int error;
 
 	assert (side == conflict->ours || side == conflict->theirs);
 
-	if (checkout_target_fullpath(&fullpath, data, side->path) < 0)
-		return -1;
+	if ((error = checkout_target_fullpath(&fullpath, data, side->path)) < 0)
+		goto cleanup;
 
 	if ((conflict->name_collision || conflict->directoryfile) &&
 		(data->strategy & GIT_CHECKOUT_USE_OURS) == 0 &&
@@ -1997,18 +2269,25 @@ static int checkout_write_entry(
 			suffix = data->opts.their_label ? data->opts.their_label :
 				"theirs";
 
-		if (checkout_path_suffixed(fullpath, suffix) < 0)
-			return -1;
+		if (checkout_path_suffixed(&fullpath, suffix) < 0) {
+			error = -1;
+			goto cleanup;
+		}
 
 		hint_path = side->path;
 	}
 
 	if ((data->strategy & GIT_CHECKOUT_UPDATE_ONLY) != 0 &&
-		(error = checkout_safe_for_update_only(data, fullpath->ptr, side->mode)) <= 0)
-		return error;
+		(error = checkout_safe_for_update_only(data, git_buf_cstr(&fullpath),
+		side->mode)) <= 0)
+		goto cleanup;
 
-	return checkout_write_content(data,
-		&side->id, fullpath->ptr, hint_path, side->mode, &st);
+	error = checkout_write_content(data, &side->id, git_buf_cstr(&fullpath),
+		hint_path, side->mode, &st);
+
+cleanup:
+	git_buf_free(&fullpath);
+	return error;
 }
 
 static int checkout_write_entries(
@@ -2319,7 +2598,7 @@ static void checkout_data_clear(checkout_data *data)
 	git__free(data->pfx);
 	data->pfx = NULL;
 
-	git_buf_free(&data->target_path);
+	git_buf_free(&data->repo_path);
 	git_buf_free(&data->tmp);
 
 	git_index_free(data->index);
@@ -2329,6 +2608,9 @@ static void checkout_data_clear(checkout_data *data)
 	data->mkdir_map = NULL;
 
 	git_attr_session__free(&data->attr_session);
+
+	git_mutex_free(&data->index_mutex);
+	git_mutex_free(&data->mkpath_mutex);
 }
 
 static int checkout_data_init(
@@ -2352,6 +2634,8 @@ static int checkout_data_init(
 
 	data->repo = repo;
 	data->target = target;
+	git_mutex_init(&data->index_mutex);
+	git_mutex_init(&data->mkpath_mutex);
 
 	GITERR_CHECK_VERSION(
 		proposed, GIT_CHECKOUT_OPTIONS_VERSION, "git_checkout_options");
@@ -2479,14 +2763,17 @@ static int checkout_data_init(
 	if ((error = git_vector_init(&data->removes, 0, git__strcmp_cb)) < 0 ||
 		(error = git_vector_init(&data->remove_conflicts, 0, NULL)) < 0 ||
 		(error = git_vector_init(&data->update_conflicts, 0, NULL)) < 0 ||
-		(error = git_buf_puts(&data->target_path, data->opts.target_directory)) < 0 ||
-		(error = git_path_to_dir(&data->target_path)) < 0 ||
+		(error = git_buf_puts(&data->repo_path, data->opts.target_directory)) < 0 ||
+		(error = git_path_to_dir(&data->repo_path)) < 0 ||
 		(error = git_strmap_alloc(&data->mkdir_map)) < 0)
 		goto cleanup;
 
-	data->target_len = git_buf_len(&data->target_path);
-
+	git_buf_truncate(&data->repo_path, git_buf_len(&data->repo_path));
 	git_attr_session__init(&data->attr_session, data->repo);
+
+	git_atomic_set(&data->perfdata.mkdir_calls, 0);
+	git_atomic_set(&data->perfdata.stat_calls, 0);
+	git_atomic_set(&data->perfdata.chmod_calls, 0);
 
 cleanup:
 	if (error < 0)
@@ -2603,7 +2890,7 @@ int git_checkout_iterator(
 		goto cleanup;
 
 	if (counts[CHECKOUT_ACTION__UPDATE_BLOB] > 0 &&
-		(error = checkout_create_the_new(actions, &data)) < 0)
+		(error = ll_checkout_create_the_new(actions, &data)) < 0)
 		goto cleanup;
 
 	if (counts[CHECKOUT_ACTION__UPDATE_SUBMODULE] > 0 &&
@@ -2620,8 +2907,13 @@ int git_checkout_iterator(
 
 	assert(data.completed_steps == data.total_steps);
 
-	if (data.opts.perfdata_cb)
-		data.opts.perfdata_cb(&data.perfdata, data.opts.perfdata_payload);
+	if (data.opts.perfdata_cb) {
+		git_checkout_perfdata perfdata;
+		perfdata.mkdir_calls = git_atomic_get(&data.perfdata.mkdir_calls);
+		perfdata.stat_calls = git_atomic_get(&data.perfdata.stat_calls);
+		perfdata.chmod_calls = git_atomic_get(&data.perfdata.chmod_calls);
+		data.opts.perfdata_cb(&perfdata, data.opts.perfdata_payload);
+	}
 
 cleanup:
 	if (!error && data.index != NULL &&

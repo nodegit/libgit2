@@ -5,10 +5,11 @@
  * a Linking Exception. For full terms see the included COPYING file.
  */
 
+#include "filter.h"
+
 #include "common.h"
 #include "fileops.h"
 #include "hash.h"
-#include "filter.h"
 #include "repository.h"
 #include "global.h"
 #include "git2/sys/filter.h"
@@ -895,7 +896,7 @@ static int stream_list_init(
 			git_array_size(filters->filters) - 1 - i : i;
 		git_filter_entry *fe = git_array_get(filters->filters, filter_idx);
 		git_writestream *filter_stream;
-		
+
 		assert(fe->filter->stream || fe->filter->apply);
 
 		/* If necessary, create a stream that proxies the traditional
@@ -1021,4 +1022,10 @@ int git_filter_list_stream_blob(
 		git_oid_cpy(&filters->source.oid, git_blob_id(blob));
 
 	return git_filter_list_stream_data(filters, &in, target);
+}
+
+int git_filter_init(git_filter *filter, unsigned int version)
+{
+	GIT_INIT_STRUCTURE_FROM_TEMPLATE(filter, version, git_filter, GIT_FILTER_INIT);
+	return 0;
 }

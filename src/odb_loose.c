@@ -6,6 +6,7 @@
  */
 
 #include "common.h"
+
 #include <zlib.h>
 #include "git2/object.h"
 #include "git2/sys/odb_backend.h"
@@ -205,6 +206,11 @@ static int start_inflate(z_stream *s, git_buf *obj, void *out, size_t len)
 	return inflate(s, 0);
 }
 
+static void abort_inflate(z_stream *s)
+{
+	inflateEnd(s);
+}
+
 static int finish_inflate(z_stream *s)
 {
 	int status = Z_OK;
@@ -367,6 +373,7 @@ static int inflate_disk_obj(git_rawobj *out, git_buf *obj)
 		(used = get_object_header(&hdr, head)) == 0 ||
 		!git_object_typeisloose(hdr.type))
 	{
+		abort_inflate(&zs);
 		giterr_set(GITERR_ODB, "failed to inflate disk object");
 		return -1;
 	}
@@ -844,7 +851,7 @@ static int filebuf_flags(loose_backend *backend)
 	int flags = GIT_FILEBUF_TEMPORARY |
 		(backend->object_zlib_level << GIT_FILEBUF_DEFLATE_SHIFT);
 
-	if (backend->fsync_object_files || git_object__synchronous_writing)
+	if (backend->fsync_object_files || git_repository__fsync_gitdir)
 		flags |= GIT_FILEBUF_FSYNC;
 
 	return flags;

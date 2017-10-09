@@ -5,9 +5,9 @@
  * a Linking Exception. For full terms see the included COPYING file.
  */
 
-#include "common.h"
-#include "odb.h"
 #include "pack.h"
+
+#include "odb.h"
 #include "delta.h"
 #include "sha1_lookup.h"
 #include "mwindow.h"
@@ -312,7 +312,7 @@ static int pack_index_open(struct git_pack_file *p)
 {
 	int error = 0;
 	size_t name_len;
-	git_buf idx_name = GIT_BUF_INIT;
+	git_buf idx_name;
 
 	if (p->index_version > -1)
 		return 0;
@@ -320,11 +320,13 @@ static int pack_index_open(struct git_pack_file *p)
 	name_len = strlen(p->pack_name);
 	assert(name_len > strlen(".pack")); /* checked by git_pack_file alloc */
 
-	git_buf_grow(&idx_name, name_len);
+	if (git_buf_init(&idx_name, name_len) < 0)
+		return -1;
+
 	git_buf_put(&idx_name, p->pack_name, name_len - strlen(".pack"));
 	git_buf_puts(&idx_name, ".idx");
 	if (git_buf_oom(&idx_name)) {
-		giterr_set_oom();
+		git_buf_free(&idx_name);
 		return -1;
 	}
 
@@ -1314,11 +1316,7 @@ static int pack_entry_find_offset(
 		short_oid->id[0], short_oid->id[1], short_oid->id[2], lo, hi, p->num_objects);
 #endif
 
-#ifdef GIT_USE_LOOKUP
-	pos = sha1_entry_pos(index, stride, 0, lo, hi, p->num_objects, short_oid->id);
-#else
 	pos = sha1_position(index, stride, lo, hi, short_oid->id);
-#endif
 
 	if (pos >= 0) {
 		/* An object matching exactly the oid was found */

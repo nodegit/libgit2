@@ -5,6 +5,8 @@
  * a Linking Exception. For full terms see the included COPYING file.
  */
 
+#include "common.h"
+
 #ifdef GIT_WINHTTP
 
 #include "git2.h"
@@ -429,7 +431,6 @@ static int winhttp_stream_connect(winhttp_stream *s)
 			git_buf_printf(&processed_url, ":%s", t->proxy_connection_data.port);
 
 		if (git_buf_oom(&processed_url)) {
-			giterr_set_oom();
 			error = -1;
 			goto on_error;
 		}

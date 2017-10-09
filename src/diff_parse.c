@@ -4,9 +4,10 @@
  * This file is part of libgit2, distributed under the GNU GPL v2 with
  * a Linking Exception. For full terms see the included COPYING file.
  */
-#include "common.h"
-#include "diff.h"
+
 #include "diff_parse.h"
+
+#include "diff.h"
 #include "patch.h"
 #include "patch_parse.h"
 
@@ -45,7 +46,7 @@ static git_diff_parsed *diff_parsed_alloc(void)
 	diff->base.free_fn = diff_parsed_free;
 
 	if (git_diff_init_options(&diff->base.opts, GIT_DIFF_OPTIONS_VERSION) < 0) {
-		git__free(&diff);
+		git__free(diff);
 		return NULL;
 	}
 

@@ -31,7 +31,7 @@ void test_pack_packbuilder__cleanup(void)
 	git_oid *o;
 	unsigned int i;
 
-	cl_git_pass(git_libgit2_opts(GIT_OPT_ENABLE_SYNCHRONOUS_OBJECT_CREATION, 0));
+	cl_git_pass(git_libgit2_opts(GIT_OPT_ENABLE_FSYNC_GITDIR, 0));
 
 	if (_commits_is_initialized) {
 		_commits_is_initialized = 0;
@@ -116,7 +116,7 @@ void test_pack_packbuilder__create_pack(void)
 	 * $ cd tests/resources/testrepo.git
 	 * $ git rev-list --objects HEAD | \
 	 * 	git pack-objects -q --no-reuse-delta --threads=1 pack
-	 * $ sha1sum git-80e61eb315239ef3c53033e37fee43b744d57122.pack
+	 * $ sha1sum pack-7f5fa362c664d68ba7221259be1cbd187434b2f0.pack
 	 * 5d410bdf97cf896f9007681b92868471d636954b
 	 *
 	 */
@@ -145,7 +145,7 @@ void test_pack_packbuilder__get_hash(void)
 	git_packbuilder_write(_packbuilder, ".", 0, NULL, NULL);
 	git_oid_fmt(hex, git_packbuilder_hash(_packbuilder));
 
-	cl_assert_equal_s(hex, "80e61eb315239ef3c53033e37fee43b744d57122");
+	cl_assert_equal_s(hex, "7f5fa362c664d68ba7221259be1cbd187434b2f0");
 }
 
 static void test_write_pack_permission(mode_t given, mode_t expected)
@@ -169,10 +169,10 @@ static void test_write_pack_permission(mode_t given, mode_t expected)
 	mask = p_umask(0);
 	p_umask(mask);
 
-	cl_git_pass(p_stat("pack-80e61eb315239ef3c53033e37fee43b744d57122.idx", &statbuf));
+	cl_git_pass(p_stat("pack-7f5fa362c664d68ba7221259be1cbd187434b2f0.idx", &statbuf));
 	cl_assert_equal_i(statbuf.st_mode & os_mask, (expected & ~mask) & os_mask);
 
-	cl_git_pass(p_stat("pack-80e61eb315239ef3c53033e37fee43b744d57122.pack", &statbuf));
+	cl_git_pass(p_stat("pack-7f5fa362c664d68ba7221259be1cbd187434b2f0.pack", &statbuf));
 	cl_assert_equal_i(statbuf.st_mode & os_mask, (expected & ~mask) & os_mask);
 }
 
@@ -209,7 +209,7 @@ static int expected_fsyncs = 4;
 
 void test_pack_packbuilder__fsync_global_setting(void)
 {
-	cl_git_pass(git_libgit2_opts(GIT_OPT_ENABLE_SYNCHRONOUS_OBJECT_CREATION, 1));
+	cl_git_pass(git_libgit2_opts(GIT_OPT_ENABLE_FSYNC_GITDIR, 1));
 	p_fsync__cnt = 0;
 	seed_packbuilder();
 	git_packbuilder_write(_packbuilder, ".", 0666, NULL, NULL);

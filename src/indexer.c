@@ -5,10 +5,11 @@
  * a Linking Exception. For full terms see the included COPYING file.
  */
 
+#include "indexer.h"
+
 #include "git2/indexer.h"
 #include "git2/object.h"
 
-#include "common.h"
 #include "pack.h"
 #include "mwindow.h"
 #include "posix.h"
@@ -125,7 +126,7 @@ int git_indexer_new(
 	git_hash_ctx_init(&idx->hash_ctx);
 	git_hash_ctx_init(&idx->trailer);
 
-	if (git_object__synchronous_writing)
+	if (git_repository__fsync_gitdir)
 		idx->do_fsync = 1;
 
 	error = git_buf_joinpath(&path, prefix, suff);
@@ -937,7 +938,6 @@ int git_indexer_commit(git_indexer *idx, git_transfer_progress *stats)
 	git_buf filename = GIT_BUF_INIT;
 	struct entry *entry;
 	git_oid trailer_hash, file_hash;
-	git_hash_ctx ctx;
 	git_filebuf index_file = {0};
 	void *packfile_trailer;
 
@@ -945,9 +945,6 @@ int git_indexer_commit(git_indexer *idx, git_transfer_progress *stats)
 		giterr_set(GITERR_INDEXER, "incomplete pack header");
 		return -1;
 	}
-
-	if (git_hash_ctx_init(&ctx) < 0)
-		return -1;
 
 	/* Test for this before resolve_deltas(), as it plays with idx->off */
 	if (idx->off + 20 < idx->pack->mwf.size) {
@@ -992,6 +989,10 @@ int git_indexer_commit(git_indexer *idx, git_transfer_progress *stats)
 
 	git_vector_sort(&idx->objects);
 
+	/* Use the trailer hash as the pack file name to ensure
+	 * files with different contents have different names */
+	git_oid_cpy(&idx->hash, &trailer_hash);
+
 	git_buf_sets(&filename, idx->pack->pack_name);
 	git_buf_shorten(&filename, strlen("pack"));
 	git_buf_puts(&filename, "idx");
@@ -1018,9 +1019,7 @@ int git_indexer_commit(git_indexer *idx, git_transfer_progress *stats)
 	/* Write out the object names (SHA-1 hashes) */
 	git_vector_foreach(&idx->objects, i, entry) {
 		git_filebuf_write(&index_file, &entry->oid, sizeof(git_oid));
-		git_hash_update(&ctx, &entry->oid, GIT_OID_RAWSZ);
 	}
-	git_hash_final(&idx->hash, &ctx);
 
 	/* Write out the CRC32 values */
 	git_vector_foreach(&idx->objects, i, entry) {
@@ -1106,14 +1105,12 @@ int git_indexer_commit(git_indexer *idx, git_transfer_progress *stats)
 	idx->pack_committed = 1;
 
 	git_buf_free(&filename);
-	git_hash_ctx_cleanup(&ctx);
 	return 0;
 
 on_error:
 	git_mwindow_free_all(&idx->pack->mwf);
 	git_filebuf_cleanup(&index_file);
 	git_buf_free(&filename);
-	git_hash_ctx_cleanup(&ctx);
 	return -1;
 }
 
