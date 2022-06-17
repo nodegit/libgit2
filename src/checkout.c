@@ -1567,7 +1567,7 @@ static int blob_content_to_file(
 
 	filter_session.attr_session = &data->attr_session;
 	filter_session.temp_buf = &buffers->tmp;
-
+	filter_session.disabled_filters = &data->opts.disabled_filters;
 	if (!data->opts.disable_filters) {
 		git_mutex_lock(&data->index_mutex);
 
@@ -2425,6 +2425,7 @@ static int checkout_write_merge(
 
 		filter_session.attr_session = &data->attr_session;
 		filter_session.temp_buf = &buffers->tmp;
+		filter_session.disabled_filters = &data->opts.disabled_filters;
 
 		if ((error = git_filter_list__load(
 				&fl, data->repo, NULL, result.path,
@@ -2998,7 +2999,7 @@ int git_checkout_iterator(
 
 	if (data.strategy & GIT_CHECKOUT_DRY_RUN)
 		goto cleanup;
-	
+
 	data.total_steps = counts[CHECKOUT_ACTION__REMOVE] +
 		counts[CHECKOUT_ACTION__REMOVE_CONFLICT] +
 		counts[CHECKOUT_ACTION__UPDATE_BLOB] +

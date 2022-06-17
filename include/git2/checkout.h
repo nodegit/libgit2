@@ -182,7 +182,7 @@ typedef enum {
 	 * notifications; don't update the working directory or index.
 	 */
 	GIT_CHECKOUT_DRY_RUN = (1u << 24),
-	
+
 	/**
 	 * THE FOLLOWING OPTIONS ARE NOT YET IMPLEMENTED
 	 */
@@ -339,6 +339,7 @@ typedef struct git_checkout_options {
 
 	/** Payload passed to perfdata_cb */
 	void *perfdata_payload;
+	git_strarray disabled_filters;
 } git_checkout_options;
 
 #define GIT_CHECKOUT_OPTIONS_VERSION 1
