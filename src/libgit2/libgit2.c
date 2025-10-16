@@ -9,6 +9,7 @@
 #include "alloc.h"
 #include "buf.h"
 #include "common.h"
+#include "custom_tls.h"
 #include "filter.h"
 #include "hash.h"
 #include "merge_driver.h"
@@ -42,6 +43,7 @@ int git_libgit2_init(void)
 		git_threads_global_init,
 		git_oid_global_init,
 		git_rand_global_init,
+		git_custom_tls__global_init,
 		git_hash_global_init,
 		git_sysdir_global_init,
 		git_filter_global_init,
